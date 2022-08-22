@@ -3,11 +3,12 @@ from requests import get
 from argparse import ArgumentParser
 from re import findall, match
 from functools import lru_cache
-from time import time
+from time import time, sleep
 from pika import BlockingConnection, ConnectionParameters, PlainCredentials
 from os import getenv
 from pymongo import MongoClient
 from bson.objectid import ObjectId
+import sys
 import structlog
 import logging
 import traceback
@@ -16,6 +17,8 @@ import prometheus_client
 PAGE_PARSED = prometheus_client.Counter('crawler_pages_parsed', 'Number of pages parsed by crawler')
 HISTOGRAM_SITE_CONNECTION_TIME = prometheus_client.Histogram('crawler_site_connection_time', 'How much time it took for crawler to get page')
 HISTOGRAM_PAGE_PARSE_TIME = prometheus_client.Histogram('crawler_page_parse_time', 'How much time it took to parse a page')
+
+CONNECT_TO_MQ_ATTEMPTS = 5
 
 def connect_db():
     try:
@@ -38,25 +41,34 @@ def connect_db():
         return db
 
 def connect_to_mq():
-    try:
-        credentials = PlainCredentials(mquser, mqpass)
-        rabbit = BlockingConnection(ConnectionParameters(
-            host=mqhost,
-            connection_attempts=10,
-            retry_delay=1,
-            credentials=credentials))
-    except Exception as e:
-        log.error('connect_to_MQ',
-                  service="crawler",
-                  message="Failed connect to MQ",
-                  traceback=traceback.format_exc()
-                  )
-    else:
-        log.info('connect_to_MQ',
-                  service="crawler",
-                  message='Successfully connected to MQ host {}'.format(mqhost)
-                )
-        return rabbit.channel()
+    for attempt in range(1, CONNECT_TO_MQ_ATTEMPTS + 1):
+        sleep(3)
+
+        try:
+            credentials = PlainCredentials(mquser, mqpass)
+            rabbit = BlockingConnection(ConnectionParameters(
+                host=mqhost,
+                connection_attempts=10,
+                retry_delay=1,
+                credentials=credentials))
+        except Exception as e:
+            if attempt < CONNECT_TO_MQ_ATTEMPTS:
+                log.info('connect_to_MQ',
+                         service="crawler",
+                         message=f"Failed connect to MQ (attempt #{attempt})"
+                         )
+            else:
+                log.error('connect_to_MQ',
+                          service="crawler",
+                          message="Failed connect to MQ (all attempts are over)",
+                          traceback=traceback.format_exc()
+                          )
+        else:
+            log.info('connect_to_MQ',
+                     service="crawler",
+                     message='Successfully connected to MQ host {}'.format(mqhost)
+                     )
+            return rabbit.channel()
 
 
 logg = logging.getLogger('werkzeug')
@@ -272,6 +284,9 @@ def publish_url(url):
 if __name__ == "__main__":
 
     channel = connect_to_mq()
+    if channel is None:
+        sys.exit(1)
+
     channel.queue_declare(queue=mqqueue)
     parser = ArgumentParser(description='Simple web crawler')
     parser.add_argument('url', help='URL to start')

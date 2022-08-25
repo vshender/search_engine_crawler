@@ -1,0 +1,67 @@
+image: docker:20.10.16
+
+stages:
+  - build
+  - test
+  - deploy
+
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ''
+  DOCKER_IMAGE_VERSION: $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
+  DOCKER_IMAGE_NAME: $DOCKER_HUB_LOGIN/search_engine_crawler:$DOCKER_IMAGE_VERSION
+
+build_job:
+  stage: build
+  services:
+    - docker:20.10.16-dind
+  script:
+    - docker info
+    - docker build --tag $DOCKER_IMAGE_NAME .
+    - docker login --username $DOCKER_HUB_LOGIN --password $DOCKER_HUB_PASSWORD
+    - docker push $DOCKER_IMAGE_NAME
+
+test_unit_job:
+  stage: test
+  services:
+    - docker:20.10.16-dind
+  script:
+    - docker run --entrypoint python $DOCKER_IMAGE_NAME -m unittest discover -s tests/
+
+staging:
+  stage: deploy
+  when: manual
+  only:
+    - master
+  image: python:3.9
+  script:
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | base64 -d > ~/.ssh/appuser
+    - chmod 0600 ~/.ssh/appuser
+    - pip install ansible
+    - git clone -b gitlab https://github.com/vshender/otus-devops-project.git
+    - cd otus-devops-project/deploy/ansible
+    - echo "env ansible_host=$STAGING_HOST" > inventory
+    - ansible-playbook playbooks/deploy.yml --extra-vars "username=$DOCKER_HUB_LOGIN crawler_version=$DOCKER_IMAGE_VERSION"
+  environment:
+    name: staging
+    url: http://$STAGING_HOST:8000
+
+production:
+  stage: deploy
+  when: manual
+  only:
+    - /^\d+\.\d+\.\d+/
+  image: python:3.9
+  script:
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | base64 -d > ~/.ssh/appuser
+    - chmod 0600 ~/.ssh/appuser
+    - pip install ansible
+    - git clone -b gitlab https://github.com/vshender/otus-devops-project.git
+    - cd otus-devops-project/deploy/ansible
+    - echo "env ansible_host=PRODUCTION_HOST" > inventory
+    - ansible-playbook playbooks/deploy.yml --extra-vars "username=$DOCKER_HUB_LOGIN crawler_version=$DOCKER_IMAGE_VERSION"
+  environment:
+    name: production
+    url: http://$PRODUCTION_HOST:8000
